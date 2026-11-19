@@ -13,6 +13,14 @@ plus one deliberately invalid VCF used to demonstrate whole-file rejection:
 * batch_c.vcf : samples S3, S4 (S3 duplicated in batch_b)
 * bad_ref_conflict.vcf : same coordinate as batch_a but a different REF
 
+Files for the replacement (换件) demo:
+
+* replacement_b.vcf : a corrected reissue of batch_b. Samples S2, S5 -- S3
+  disappears (its group becomes single-source or vanished), S5 is new, and
+  every site keeps the same REF so the swap commits.
+* bad_replacement_b.vcf : same samples as batch_b but a REF conflict with
+  batch_a at chr1:100, so swapping it in must fail the batch.
+
 The trio covers:
   - multiallelic sites with 2-3 ALT alleles,
   - ALT unions whose order differs across files,
@@ -108,6 +116,35 @@ def main(out_dir: str) -> None:
     ]
     write_vcf(out / "batch_c.vcf", ["S3", "S4"], rows_c)
 
+    # ---- replacement demo: corrected reissue of batch_b --------------------
+    replacement_rows = [
+        # Same REF as batch_a at chr1:100 so the whole batch stays consistent.
+        "chr1\t100\t.\tA\tT,G\t.\t.\t.\tGT:AD:PL\t"
+        "0/1:10,7,2:0,12,180,16,200,210\t"
+        "0/2:4,0,13:180,160,12,200,25,0",
+        "chr2\t100\t.\tT\tG\t.\t.\t.\tGT:AD:PL\t"
+        "0/1:9,8:0,11,190\t"
+        "1/1:0,15:235,21,0",
+        "chr2\t300\t.\tG\tA,T\t.\t.\t.\tGT:AD:PL\t"
+        "0/2:8,1,7:0,160,14,200,210,180\t"
+        "0/1:7,6,1:0,9,170,12,180,190",
+    ]
+    write_vcf(out / "replacement_b.vcf", ["S2", "S5"], replacement_rows)
+
+    # ---- deliberately bad replacement: REF conflict with batch_a -----------
+    bad_replacement_rows = [
+        "chr1\t100\t.\tAA\tT,G\t.\t.\t.\tGT:AD:PL\t"
+        "0/1:10,7,2:0,12,180,16,200,210\t"
+        "2/2:1,1,17:250,240,230,220,210,0",
+        "chr2\t100\t.\tT\tG\t.\t.\t.\tGT:AD:PL\t"
+        "0/1:9,8:0,11,190\t"
+        "1/1:0,14:230,20,0",
+        "chr2\t300\t.\tG\tA,T\t.\t.\t.\tGT:AD:PL\t"
+        "0/2:8,1,7:0,160,14,200,210,180\t"
+        "./.:.:.",
+    ]
+    write_vcf(out / "bad_replacement_b.vcf", ["S2", "S3"], bad_replacement_rows)
+
     # ---- deliberately invalid file: REF conflict at chr1:100 -------------
     bad_rows = [
         "chr1\t100\t.\tAA\tG\t.\t.\t.\tGT:AD:PL\t"
@@ -117,7 +154,10 @@ def main(out_dir: str) -> None:
     write_vcf(out / "bad_ref_conflict.vcf", ["S5", "S6"], bad_rows)
 
     print(f"demo files written to {out.resolve()}")
-    for name in ("batch_a.vcf", "batch_b.vcf", "batch_c.vcf", "bad_ref_conflict.vcf"):
+    for name in (
+        "batch_a.vcf", "batch_b.vcf", "batch_c.vcf", "bad_ref_conflict.vcf",
+        "replacement_b.vcf", "bad_replacement_b.vcf",
+    ):
         print(" -", name)
 
 

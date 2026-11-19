@@ -36,6 +36,26 @@ STATUS_ABORTED = "aborted"
 
 TERMINAL_STATUSES = {STATUS_DONE, STATUS_FAILED, STATUS_SUPERSEDED, STATUS_ABORTED}
 
+# Original-file replacement (lab reissues a corrected VCF) status values.
+REPLACE_VALIDATING = "validating"
+REPLACE_COMMITTED = "committed"
+REPLACE_FAILED = "failed"
+REPLACE_REJECTED = "rejected"
+
+REPLACE_TERMINAL_STATUSES = {
+    REPLACE_COMMITTED,
+    REPLACE_FAILED,
+    REPLACE_REJECTED,
+}
+
+# Optional artificial delay before a replacement validation runs. It makes the
+# "selection may change while validating" and "a second replacement commits
+# first" behaviours demonstrable from the web UI in Docker Compose. Default 0
+# keeps tests and normal use fast.
+REPLACE_VALIDATE_DELAY_SECONDS = float(
+    os.environ.get("VCF_REPLACE_VALIDATE_DELAY_SECONDS", "0") or 0
+)
+
 
 def ensure_dirs() -> None:
     for directory in (UPLOAD_DIR, OUTPUT_DIR, TMP_DIR):

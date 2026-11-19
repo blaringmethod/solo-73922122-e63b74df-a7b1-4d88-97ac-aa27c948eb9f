@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import config, db, service
-from .service import SelectionError
+from .service import ReplacementError, SelectionError
 
 
 @asynccontextmanager
@@ -87,6 +87,19 @@ def _generation_payload(row) -> dict:
     }
 
 
+def _replacement_payload(row) -> dict:
+    return {
+        "id": row["id"],
+        "target_file_id": row["target_file_id"],
+        "original_name": row["original_name"],
+        "status": row["status"],
+        "error": row["error"],
+        "created_at": row["created_at"],
+        "finished_at": row["finished_at"],
+        "validating": row["status"] == config.REPLACE_VALIDATING,
+    }
+
+
 def _batch_payload(conn, batch_id: str) -> dict:
     batch = db.get_batch(conn, batch_id)
     if batch is None:
@@ -95,6 +108,9 @@ def _batch_payload(conn, batch_id: str) -> dict:
     groups = [_group_payload(conn, row) for row in db.get_dup_groups(conn, batch_id)]
     latest = db.get_latest_generation(conn, batch_id)
     unresolved = [g["sample_name"] for g in groups if not g["chosen_file_id"]]
+    replacements = [
+        _replacement_payload(row) for row in db.get_replacements(conn, batch_id)
+    ]
     return {
         "id": batch["id"],
         "created_at": batch["created_at"],
@@ -102,10 +118,14 @@ def _batch_payload(conn, batch_id: str) -> dict:
         "batch_valid": bool(batch["valid"]),
         "batch_errors": json.loads(batch["errors_json"]),
         "selection_version": batch["selection_version"],
+        "replace_seq": batch["replace_seq"],
         "files": files,
         "dup_groups": groups,
         "unresolved_samples": unresolved,
+        "replacements": replacements,
+        "replace_in_progress": any(r["validating"] for r in replacements),
         "ready_to_generate": bool(batch["valid"]) and not unresolved
+        and not any(r["validating"] for r in replacements)
         and sum(1 for f in files if f["valid"]) >= config.MIN_FILES,
         "latest_generation": _generation_payload(latest) if latest else None,
     }
@@ -195,6 +215,25 @@ def update_selection(
         raise HTTPException(status_code=409, detail=str(exc))
     with db.get_db() as conn:
         return _batch_payload(conn, batch_id)
+
+
+@app.post("/api/batches/{batch_id}/replacements")
+def create_replacement(
+    batch_id: str,
+    target_file_id: str = Form(...),
+    file: UploadFile = File(...),
+):
+    # The upload object must remain open until the staged copy is written.
+    try:
+        replacement_id = service.submit_replacement(
+            batch_id, target_file_id, file.filename or "", file.file
+        )
+    except ReplacementError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    with db.get_db() as conn:
+        payload = _batch_payload(conn, batch_id)
+    payload["replacement_id"] = replacement_id
+    return payload
 
 
 @app.post("/api/batches/{batch_id}/generate")

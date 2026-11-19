@@ -20,6 +20,16 @@ SQLite 中记录状态，并通过“选择版本号”保证下载到的永远�
 | 新增等位的未知值保留缺失 | 其他文件引入的等位对应 AD/PL 槽位输出 `.`，不伪造数值 |
 | 缺少位点不能当作 0/0 | 源文件无该坐标时输出 `./.` 且 AD/PL 全缺失 |
 | 同坐标 REF 冲突则整份失败 | 跨文件 REF 比对，冲突写入批次级错误并阻断生成 |
+| 换件只能替换同批一份原件，其余原件须已通过单文件校验 | `POST /api/batches/{id}/replacements` 同步检查目标属于该批、其余原件 `valid=1` |
+| 换件须校验新原件及其换件后的整批文件 | 后台校验新原件单文件规则，再以“新原件 + 其余原件”跑跨文件检查（参考版本、REF 冲突、contig 顺序） |
+| 校验期间仍可改选样本来源 | 选择接口不因换件校验而禁用；提交换件的事务内重读最新选择 |
+| 校验期间换件阻止生成 | 校验中 `ready_to_generate=false`，生成接口返回 409 |
+| 校验失败显示原因，原批次照常使用 | 换件记录 `failed` 并带原因；原件、校验状态、分组、版本号均不变 |
+| 校验期间有另一次换件先提交，本次拒绝并提示刷新 | 每次换件记录提交时的 `replace_seq`；提交事务内不一致即 `rejected`，页面提示刷新 |
+| 成功换件一并更新原件、校验状态与样本分组 | `commit_replacement` 单事务内落库并重建 `dup_groups` |
+| 旧合并结果及在途生成立即失效 | 同一事务内 `selection_version+1`，done/running/pending 全部 `superseded`，输出文件删除 |
+| 换件后只有一个来源的样本自动选定 | 重建分组时 `len(file_ids)==1` 直接选定 |
+| 换件前多来源且已选中未换原件则沿用，否则待确认 | 重建分组时仅当“换件前已多来源”且“原选择仍是未换原件的来源”才沿用，否则清空选择 |
 | 后台生成时可改取用源，改动立即使旧结果及在途生成失效 | 每次变更 `selection_version+1`，既有 generation 立即置 `superseded`，worker 在位点间检查版本并中止 |
 | 改回也不能恢复 | 版本号只增不减；旧 generation 不会回退，输出文件被删除，需重新生成 |
 | 只下载当前选择对应的完整 VCF | 下载接口校验最新 generation 为 done、版本号等于当前版本、文件存在 |
@@ -32,11 +42,11 @@ SQLite 中记录状态，并通过“选择版本号”保证下载到的永远�
 .
 ├── app/
 │   ├── config.py        # 路径、常量、状态枚举
-│   ├── db.py            # SQLite schema、连接、版本失效、启动恢复
+│   ├── db.py            # SQLite schema、连接、版本失效、换件提交事务、启动恢复
 │   ├── validation.py    # 单文件 VCF 校验
 │   ├── cross_check.py   # 参考版本 / REF 冲突 / contig 顺序
 │   ├── merge.py         # ALT 联合与 GT/AD/PL 重排合并引擎
-│   ├── service.py       # 上传编排、选择、后台 worker
+│   ├── service.py       # 上传编排、选择、换件后台校验、后台 worker
 │   ├── main.py          # FastAPI 路由与 JSON 序列化
 │   └── static/index.html# 单页前端
 ├── demo/
@@ -44,8 +54,10 @@ SQLite 中记录状态，并通过“选择版本号”保证下载到的永远�
 │   ├── batch_a.vcf      # 样本 S1,S2（多等位、无 ALT、缺失基因型）
 │   ├── batch_b.vcf      # 样本 S2,S3（ALT 顺序不同、独有位点）
 │   ├── batch_c.vcf      # 样本 S3,S4
+│   ├── replacement_b.vcf    # batch_b 的更正补发件（S2,S5），用于换件演示
+│   ├── bad_replacement_b.vcf # 与 batch_a 在 chr1:100 REF 冲突，用于换件失败演示
 │   └── bad_ref_conflict.vcf # 故意制造 chr1:100 REF 冲突的反例
-├── tests/               # 27 个 pytest 用例
+├── tests/               # 42 个 pytest 用例
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
@@ -103,12 +115,27 @@ docker compose up --build
 6. 任何时候改动取用源：页面提示旧结果与在途任务已失效，旧输出文件立即
    删除；需要重新生成后才能再次下载。
 
+### 换件演示（实验室补发更正原件）
+
+1. 上传 `demo/batch_a.vcf`、`demo/batch_b.vcf`（S2 同时出现在两份文件中）。
+2. 在“4. 换件”中选择要替换的原件（例如 `batch_b.vcf`），上传补发的
+   `demo/replacement_b.vcf`，点“提交换件并校验”。
+3. 校验期间（Compose 默认人为延迟 4 秒，见
+   `VCF_REPLACE_VALIDATE_DELAY_SECONDS`）仍可改“取用源选择”。
+4. 结果：
+   - 成功时该原件被替换，`S2` 若原先选中的是未换原件则沿用，否则变为
+     “待确认”；只有单一来源的样本自动选定；旧结果标记“已失效”。
+   - 上传 `demo/bad_replacement_b.vcf`（REF 与 A 冲突）则换件失败并显示
+     原因，原批次仍可照常使用。
+   - 校验期间连续提交两次换件，先完成者提交，后者显示“已被拒绝，请刷新”。
+
 ## 六、HTTP API 摘要
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | `/api/batches` | multipart 上传 2~3 份 VCF，返回批次全量状态 |
-| GET | `/api/batches/{id}` | 查询批次、文件、选择分组、最新 generation |
+| GET | `/api/batches/{id}` | 查询批次、文件、选择分组、换件记录、最新 generation |
+| POST | `/api/batches/{id}/replacements` | multipart 字段 `target_file_id` + `file`，后台校验换件并返回批次状态（含 `replacement_id`） |
 | PUT | `/api/batches/{id}/selection/{group_id}` | 表单字段 `file_id`（空串表示取消选择），变更即 bump 版本并失效旧任务 |
 | POST | `/api/batches/{id}/generate` | 前置校验通过后启动后台合并线程 |
 | GET | `/api/batches/{id}/download` | 仅当最新任务 done 且版本匹配时返回完整 VCF |
@@ -127,7 +154,7 @@ docker compose up --build
 - 源文件缺少该坐标的样本：`GT=./.`、AD/PL 全缺失，绝不写 `0/0`。
 - 输出固定 `FORMAT=GT:AD:PL`，QUAL/FILTER/INFO 留空（仅保留 header 定义）。
 
-## 八、测试覆盖（29 项）
+## 八、测试覆盖（42 项）
 
 - 单文件校验 10 项：多等位合法文件、未排序、重复坐标、非 ACGT、非法
   FORMAT、缺 GT、非二倍体、缺失二倍体基因型、空文件、未声明 contig；
@@ -137,7 +164,16 @@ docker compose up --build
 - API/工作流 11 项：健康检查、上传数量、完整演示流程、REF 冲突整批失败、
   单文件损坏原因、选择变更失效已完成结果（含改回不恢复）、在途任务被
   中止且无半成品、重启恢复阻断下载、样本来源展示、BGZF 压缩 VCF 上传、
-  非法扩展名拒绝。
+  非法扩展名拒绝；
+- 换件 13 项（`tests/test_replacement.py`）：
+  - 端到端 7 项：成功换件同时更新原件/校验状态/分组、被换原件恰为已选
+    来源时改为待确认、换件失效已完成结果并删除旧输出、换件后整批校验
+    失败时显示原因且原批次照常可用、新原件单文件校验失败、其余原件未
+    通过校验时同步拒绝、校验期间可改选样本来源且提交时按最新选择重建；
+  - 并发/恢复 2 项：校验期间另一次换件先提交则本次被拒绝（刷新提示）、
+    重启把在途换件判定失败；
+  - 分组重建规则 4 项：多来源且选中未换原件则沿用、选中被换原件则清空、
+    换件前单来源换件后多来源须待确认、单来源自动选定。
 
 ## 九、关于 .vcf.gz
 

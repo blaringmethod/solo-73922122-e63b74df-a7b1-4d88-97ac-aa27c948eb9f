@@ -10,6 +10,10 @@ services:
       # it as a volume keeps uploads/results across container restarts.
       VCF_DATA_DIR: /data
       VCF_MAX_UPLOAD_BYTES: "209715200"
+      # Artificial delay for replacement validation so the "selection may
+      # change while validating" and "a second replacement commits first"
+      # paths are demonstrable from the browser. Set 0 (or remove) to disable.
+      VCF_REPLACE_VALIDATE_DELAY_SECONDS: "4"
     volumes:
       - vcf_data:/data
     restart: unless-stopped

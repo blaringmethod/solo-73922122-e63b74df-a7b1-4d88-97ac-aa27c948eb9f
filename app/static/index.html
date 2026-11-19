@@ -126,6 +126,15 @@
   #toast.show { opacity: 1; }
   .muted { color: var(--muted); }
   .pill-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0; }
+  .replace-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .replace-row select { min-width: 260px; }
+  .replace-item {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin: 8px 0;
+    font-size: 13px;
+  }
 </style>
 </head>
 <body>
@@ -170,6 +179,7 @@
       <p class="hint">
         出现在多份文件中的样本必须选择唯一一个原件取用；未全部选定前不能生成。
         选择变更会立即令旧结果与在途生成失效（改回也不能恢复）。
+        换件校验期间仍可改选样本来源，换件提交时按最新选择重建样本分组。
       </p>
       <table>
         <thead>
@@ -180,7 +190,24 @@
     </section>
 
     <section class="card">
-      <h2>4. 生成与下载队列 VCF</h2>
+      <h2>4. 换件（实验室补发更正原件）</h2>
+      <p class="hint">
+        可替换同批次中的<b>一份</b>检测原件。其余原件须已通过单文件校验。
+        新原件会先做单文件校验，再连同换件后的整批一起校验；校验期间仍可改选
+        样本来源。校验失败会显示原因，原批次照常使用；成功换件会一并更新原件、
+        校验状态与样本分组，并令旧合并结果与在途生成失效。
+      </p>
+      <div class="replace-row">
+        <select id="replaceTarget"></select>
+        <input id="replaceFile" type="file" accept=".vcf,.vcf.gz" />
+        <button id="replaceBtn">提交换件并校验</button>
+        <span id="replaceMsg" class="hint"></span>
+      </div>
+      <div id="replacements"></div>
+    </section>
+
+    <section class="card">
+      <h2>5. 生成与下载队列 VCF</h2>
       <div class="pill-row">
         <button id="generateBtn">开始生成</button>
         <button id="downloadBtn" class="secondary" disabled>下载当前选择对应的完整 VCF</button>
@@ -303,17 +330,82 @@ function renderBatch(data) {
     $("downloadBtn").disabled = true;
   }
 
+  renderReplacementSection(data);
+
   $("generateBtn").disabled = !data.ready_to_generate;
   if (!data.ready_to_generate) {
-    const reason = !data.batch_valid
-      ? "批次存在阻断错误"
-      : (data.unresolved_samples.length
-          ? `仍有重复样本未选择：${data.unresolved_samples.join("、")}`
-          : "有效文件不足");
+    const reason = data.replace_in_progress
+      ? "换件校验进行中，完成后才能生成"
+      : (!data.batch_valid
+          ? "批次存在阻断错误"
+          : (data.unresolved_samples.length
+              ? `仍有重复样本未选择：${data.unresolved_samples.join("、")}`
+              : "有效文件不足"));
     $("generateBtn").title = reason;
   } else {
     $("generateBtn").title = "";
   }
+}
+
+// Mirrors the server rule: replacement is allowed only when every other
+// original has already passed per-file validation. Submitting while another
+// attempt is still validating is allowed; if that attempt commits first this
+// one is rejected and the page tells the operator to refresh.
+function updateReplaceAvailability(data) {
+  const target = $("replaceTarget").value;
+  const brokenOthers = data.files.filter((f) => !f.valid && f.id !== target);
+  if (brokenOthers.length) {
+    $("replaceBtn").disabled = true;
+    $("replaceMsg").textContent =
+      "其余原件尚未通过单文件校验，暂不能换件：" +
+      brokenOthers.map((f) => f.original_name).join("、");
+  } else if (data.replace_in_progress) {
+    $("replaceBtn").disabled = false;
+    $("replaceMsg").textContent =
+      "已有换件正在校验；若其先提交，本次换件将被拒绝并需刷新";
+  } else {
+    $("replaceBtn").disabled = false;
+    $("replaceMsg").textContent = "";
+  }
+}
+
+function renderReplacementSection(data) {
+  // Target selector: every current original is eligible; the hint explains
+  // why replacement is refused when another original is invalid.
+  const select = $("replaceTarget");
+  const previous = select.value;
+  select.innerHTML = data.files.map((f) => `
+    <option value="${esc(f.id)}">
+      ${esc(f.original_name)}${f.valid ? "" : "（当前校验未通过）"}
+    </option>`).join("");
+  if (previous && data.files.some((f) => f.id === previous)) select.value = previous;
+
+  updateReplaceAvailability(data);
+  select.onchange = () => updateReplaceAvailability(data);
+
+  const items = data.replacements || [];
+  $("replacements").innerHTML = items.length
+    ? items.map((r) => {
+        const target = data.files.find((f) => f.id === r.target_file_id);
+        const targetName = target ? target.original_name : r.target_file_id;
+        const badge = r.validating
+          ? '<span class="badge warn">校验中</span>'
+          : (r.status === "committed"
+              ? '<span class="badge ok">已换件</span>'
+              : '<span class="badge err">换件校验失败</span>');
+        return `<div class="replace-item">
+          <div>替换 <span class="mono">${esc(targetName)}</span>
+            → 新原件 <span class="mono">${esc(r.original_name)}</span>
+            ${badge}</div>
+          ${r.error ? `<div class="status-failed">${esc(r.error)}</div>` : ""}
+          <div class="muted">提交：${esc(r.created_at || "")}
+            ${r.finished_at ? "｜结束：" + esc(r.finished_at) : ""}</div>
+        </div>`;
+      }).join("")
+    : '<div class="muted">尚无换件记录</div>';
+
+  // Poll while any replacement is validating so the outcome shows up.
+  if (data.replace_in_progress) schedulePoll();
 }
 
 async function fetchBatch() {
@@ -331,7 +423,8 @@ function schedulePoll() {
     const data = await resp.json();
     renderBatch(data);
     const gen = data.latest_generation;
-    if (!gen || !["running", "pending"].includes(gen.status)) {
+    const genRunning = gen && ["running", "pending"].includes(gen.status);
+    if (!genRunning && !data.replace_in_progress) {
       clearInterval(pollTimer);
       pollTimer = null;
     }
@@ -375,6 +468,39 @@ async function submitSelection(groupId, fileId) {
   toast("取用源已更新，旧结果与在途生成已立即失效");
   renderBatch(payload);
 }
+
+$("replaceBtn").addEventListener("click", async () => {
+  if (!batchId) { toast("请先上传批次"); return; }
+  const target = $("replaceTarget").value;
+  const file = $("replaceFile").files[0];
+  if (!target) { toast("请选择要替换的原件"); return; }
+  if (!file) { toast("请选择补发的更正 VCF"); return; }
+  const form = new FormData();
+  form.append("target_file_id", target);
+  form.append("file", file);
+  $("replaceBtn").disabled = true;
+  $("replaceMsg").textContent = "提交换件，校验中…";
+  try {
+    const resp = await fetch(`/api/batches/${batchId}/replacements`, {
+      method: "POST", body: form
+    });
+    const payload = await resp.json();
+    if (!resp.ok) {
+      $("replaceMsg").textContent = "";
+      toast(payload.detail || "换件被拒绝");
+      await fetchBatch();
+      return;
+    }
+    $("replaceFile").value = "";
+    $("replaceMsg").textContent = "";
+    toast("换件已提交，正在校验新原件与整批文件");
+    renderBatch(payload);
+    schedulePoll();
+  } catch (err) {
+    $("replaceMsg").textContent = "";
+    toast("换件请求失败：" + err);
+  }
+});
 
 $("generateBtn").addEventListener("click", async () => {
   const resp = await fetch(`/api/batches/${batchId}/generate`, { method: "POST" });

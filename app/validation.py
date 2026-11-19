@@ -48,6 +48,7 @@ def _allele_ok(allele: str | None) -> bool:
 
 
 def validate_vcf(path: str) -> FileValidation:
+    vcf = None
     try:
         vcf = pysam.VariantFile(path)
     except (OSError, ValueError, NotImplementedError) as exc:
@@ -213,7 +214,8 @@ def validate_vcf(path: str) -> FileValidation:
             record_count=record_count if "record_count" in locals() else 0,
         )
     finally:
-        vcf.close()
+        if vcf is not None:
+            vcf.close()
 
 
 def references_conflict(refs: list[tuple[str, str | None]]) -> str | None:
